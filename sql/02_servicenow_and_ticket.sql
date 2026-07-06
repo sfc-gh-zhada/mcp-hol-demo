@@ -19,6 +19,19 @@ CREATE OR REPLACE TABLE MCP_HOL.SUPPORT.TICKETS (
   CREATED_AT       TIMESTAMP_NTZ
 );
 
+-- Example historical incidents so the log isn't empty in the demo.
+-- INC numbers stay below the sequence start (1001) so they never collide with
+-- tickets filed live by file_ticket (which start at INC0001001).
+-- QUEUE/PRIORITY here match the INTENT_ROUTING policy below.
+INSERT INTO MCP_HOL.SUPPORT.TICKETS
+  (INCIDENT_NUMBER, ORDER_ID, ISSUE, INTENT, QUEUE, PRIORITY, STATUS, CREATED_AT) VALUES
+  ('INC0000991', 'ORD-10002', 'Sole started splitting after two short runs',            'DEFECTIVE_ITEM',   'Product Quality',   'P2', 'Resolved',    DATEADD('day', -15, CURRENT_TIMESTAMP())),
+  ('INC0000993', 'ORD-10001', 'Love the jacket — incredibly warm on the summit',        'GENERAL_FEEDBACK', 'Customer Care',     'P4', 'Resolved',    DATEADD('day', -11, CURRENT_TIMESTAMP())),
+  ('INC0000995', 'ORD-10005', 'Boots run half a size small, need the next size up',      'SIZING_EXCHANGE',  'Returns & Refunds', 'P3', 'Resolved',    DATEADD('day',  -8, CURRENT_TIMESTAMP())),
+  ('INC0000996', 'ORD-10006', 'Rain shell has been in transit for two weeks, still not here', 'SHIPPING_DELAY', 'Logistics',    'P3', 'In Progress', DATEADD('day',  -4, CURRENT_TIMESTAMP())),
+  ('INC0000998', 'ORD-10008', 'Shoes rub my heel — would like to return them',           'RETURN_REFUND',    'Returns & Refunds', 'P2', 'In Progress', DATEADD('day',  -2, CURRENT_TIMESTAMP())),
+  ('INC0000999', 'ORD-10009', 'Just checking where my jacket is',                        'ORDER_STATUS',     'Logistics',         'P4', 'New',         DATEADD('hour', -6, CURRENT_TIMESTAMP()));
+
 -- Routing policy: intent label -> support queue + priority + SLA (company policy)
 CREATE OR REPLACE TABLE MCP_HOL.SUPPORT.INTENT_ROUTING (
   INTENT     STRING,
