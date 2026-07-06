@@ -61,3 +61,24 @@ tools:
 $$;
 
 SHOW MCP SERVERS IN SCHEMA MCP_HOL.AGENTS;
+
+-- ---------------------------------------------------------------------------
+-- Extra layer of security: admit ONLY your agent's published egress IPs.
+-- There is no ALTER MCP SERVER ... SET NETWORK_POLICY. The managed MCP server
+-- authenticates through an OAuth security integration, so you enforce the IP
+-- allow-list by attaching a network policy to THAT integration (integration-
+-- and account-level policies gate the OAuth token request for MCP; user-level
+-- policies are not evaluated for that traffic).
+-- ---------------------------------------------------------------------------
+
+-- 1. Allow only the agent's published egress IPs (Google Cloud / Vertex).
+CREATE OR REPLACE NETWORK RULE MCP_HOL.AGENTS.MCP_CLIENT_INGRESS
+  MODE = INGRESS
+  TYPE = IPV4
+  VALUE_LIST = ('<agent_egress_ip_1>', '<agent_egress_ip_2>');
+
+CREATE NETWORK POLICY IF NOT EXISTS MCP_POLICY
+  ALLOWED_NETWORK_RULE_LIST = ('MCP_HOL.AGENTS.MCP_CLIENT_INGRESS');
+
+-- 2. Enforce it on the OAuth integration the MCP server uses.
+ALTER SECURITY INTEGRATION MCP_OAUTH SET NETWORK_POLICY = MCP_POLICY;
