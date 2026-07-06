@@ -5,6 +5,21 @@
 CREATE OR REPLACE MCP SERVER MCP_HOL.AGENTS.MCP_HOL
 FROM SPECIFICATION $$
 tools:
+  - name: "classify_intent"
+    type: "GENERIC"
+    identifier: "MCP_HOL.SUPPORT.CLASSIFY_INTENT"
+    title: "Classify a support message (fine-tuned model)"
+    description: "Classify an incoming customer-support message into exactly one intent: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, or GENERAL_FEEDBACK. Backed by SUPPORT_INTENT_8B - a Llama 3.1 8B fine-tuned in-account on our own labeled messages, so the decision boundary is ours."
+    config:
+      type: "function"
+      warehouse: "COCO_WH"
+      input_schema:
+        type: "object"
+        properties:
+          message:
+            type: "string"
+            description: "The customer's support message text"
+        required: ["message"]
   - name: "search_reviews"
     type: "CORTEX_SEARCH_SERVICE_QUERY"
     identifier: "MCP_HOL.SUPPORT.SEARCH_REVIEWS"
