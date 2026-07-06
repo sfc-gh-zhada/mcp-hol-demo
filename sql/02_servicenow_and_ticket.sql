@@ -1,21 +1,43 @@
--- Tickets table + sequence (local source of truth for the demo)
--- The ticket surface is a SELF-CONTAINED Snowflake stored procedure: it mints a
--- realistic ServiceNow-style incident number and logs it. There is NO external
--- connection, NO secret, and NO network egress -- so the customer-facing agent's
--- ACTION provably cannot reach anything outside the tools we declared on the MCP.
+-- ============================================================
+-- Ticket surface + intent-driven routing
+-- file_ticket takes the intent label (produced by classify_intent) and routes
+-- the incident using a POLICY table (INTENT_ROUTING) — queue, priority, SLA the
+-- model can't invent. This is why classify_intent is necessary in the live flow:
+-- file_ticket REQUIRES a valid intent to route the case.
+-- Self-contained: no external calls, owner's rights.
+-- ============================================================
 CREATE OR REPLACE SEQUENCE MCP_HOL.SUPPORT.TICKET_SEQ START = 1001 INCREMENT = 1;
 
 CREATE OR REPLACE TABLE MCP_HOL.SUPPORT.TICKETS (
   INCIDENT_NUMBER  STRING,       -- ServiceNow-style incident id, e.g. INC0001001
   ORDER_ID         STRING,
   ISSUE            STRING,
+  INTENT           STRING,       -- from classify_intent (fine-tuned model)
+  QUEUE            STRING,       -- routed queue (policy)
+  PRIORITY         STRING,       -- routed priority (policy)
   STATUS           STRING,
   CREATED_AT       TIMESTAMP_NTZ
 );
 
--- === file_ticket tool: self-contained, owner's rights ===
--- Owner's rights so CUSTOMER_AGENT can CALL it but cannot read TICKETS directly.
-CREATE OR REPLACE PROCEDURE MCP_HOL.SUPPORT.FILE_TICKET(ORDER_ID STRING, ISSUE STRING)
+-- Routing policy: intent label -> support queue + priority + SLA (company policy)
+CREATE OR REPLACE TABLE MCP_HOL.SUPPORT.INTENT_ROUTING (
+  INTENT     STRING,
+  QUEUE      STRING,
+  PRIORITY   STRING,
+  SLA_HOURS  INT
+);
+INSERT INTO MCP_HOL.SUPPORT.INTENT_ROUTING (INTENT, QUEUE, PRIORITY, SLA_HOURS) VALUES
+  ('DEFECTIVE_ITEM',   'Product Quality',    'P2', 8),
+  ('RETURN_REFUND',    'Returns & Refunds',  'P2', 8),
+  ('SHIPPING_DELAY',   'Logistics',          'P3', 12),
+  ('SIZING_EXCHANGE',  'Returns & Refunds',  'P3', 24),
+  ('ORDER_STATUS',     'Logistics',          'P4', 24),
+  ('GENERAL_FEEDBACK', 'Customer Care',      'P4', 48);
+
+-- Drop the old 2-arg signature so the tool resolves to the routed version only.
+DROP PROCEDURE IF EXISTS MCP_HOL.SUPPORT.FILE_TICKET(VARCHAR, VARCHAR);
+
+CREATE OR REPLACE PROCEDURE MCP_HOL.SUPPORT.FILE_TICKET(ORDER_ID STRING, ISSUE STRING, INTENT STRING)
 RETURNS STRING
 LANGUAGE PYTHON
 RUNTIME_VERSION = 3.11
@@ -24,39 +46,27 @@ HANDLER = 'run'
 EXECUTE AS OWNER
 AS
 $$
-def run(session, order_id, issue):
-    seq = session.sql("SELECT MCP_HOL.SUPPORT.TICKET_SEQ.NEXTVAL").collect()[0][0]
-    inc = "INC" + str(seq).zfill(7)
+def run(session, order_id, issue, intent):
+    label = (intent or '').strip().upper()
+    row = session.sql(
+        "SELECT QUEUE, PRIORITY, SLA_HOURS FROM MCP_HOL.SUPPORT.INTENT_ROUTING WHERE INTENT = ?",
+        params=[label]).collect()
+    if row:
+        queue, priority, sla = row[0][0], row[0][1], row[0][2]
+    else:
+        # Unknown / missing intent -> cannot route to a specialist queue.
+        label, queue, priority, sla = 'UNCLASSIFIED', 'General Triage', 'P3', 24
+    seq = session.sql('SELECT MCP_HOL.SUPPORT.TICKET_SEQ.NEXTVAL').collect()[0][0]
+    inc = 'INC' + str(seq).zfill(7)
     session.sql(
-        "INSERT INTO MCP_HOL.SUPPORT.TICKETS "
-        "(INCIDENT_NUMBER, ORDER_ID, ISSUE, STATUS, CREATED_AT) "
-        "VALUES (?, ?, ?, 'New', CURRENT_TIMESTAMP())",
-        params=[inc, order_id, issue]).collect()
-    return ("Created ServiceNow incident " + inc + " for order " + str(order_id)
-            + " regarding: " + str(issue)
-            + ". A support specialist has been assigned and will follow up shortly.")
+        'INSERT INTO MCP_HOL.SUPPORT.TICKETS '
+        '(INCIDENT_NUMBER, ORDER_ID, ISSUE, INTENT, QUEUE, PRIORITY, STATUS, CREATED_AT) '
+        "VALUES (?, ?, ?, ?, ?, ?, 'New', CURRENT_TIMESTAMP())",
+        params=[inc, order_id, issue, label, queue, priority]).collect()
+    return ('Created ServiceNow incident ' + inc + ' for order ' + str(order_id)
+            + ' — classified as ' + label + ', routed to the ' + queue
+            + ' queue at priority ' + priority + ' (SLA ' + str(sla) + 'h). '
+            + 'A specialist will follow up shortly.')
 $$;
 
--- Re-grant: CREATE OR REPLACE PROCEDURE drops existing grants.
-GRANT USAGE ON PROCEDURE MCP_HOL.SUPPORT.FILE_TICKET(VARCHAR, VARCHAR) TO ROLE CUSTOMER_AGENT;
-
--- =====================================================================
--- OPTIONAL UPGRADE PATH (NOT run for the demo): point file_ticket at a
--- REAL ServiceNow instance via External Access. The agent surface and the
--- CUSTOMER_AGENT grants are identical -- only the procedure body changes,
--- so nothing about the governance story shifts. Uncomment + fill in a live
--- dev instance host, user, and password to enable.
--- =====================================================================
--- CREATE OR REPLACE NETWORK RULE MCP_HOL.SUPPORT.SERVICENOW_RULE
---   MODE = EGRESS TYPE = HOST_PORT VALUE_LIST = ('dev123456.service-now.com');
--- CREATE OR REPLACE SECRET MCP_HOL.SUPPORT.SERVICENOW_CRED
---   TYPE = PASSWORD USERNAME = 'svc_agent' PASSWORD = 'REPLACE_WITH_SERVICENOW_PASSWORD';
--- CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION SERVICENOW_MCP_HOL_INT
---   ALLOWED_NETWORK_RULES = (MCP_HOL.SUPPORT.SERVICENOW_RULE)
---   ALLOWED_AUTHENTICATION_SECRETS = (MCP_HOL.SUPPORT.SERVICENOW_CRED) ENABLED = TRUE;
--- Then CREATE OR REPLACE the procedure with:
---   EXTERNAL_ACCESS_INTEGRATIONS = (SERVICENOW_MCP_HOL_INT)
---   PACKAGES = ('snowflake-snowpark-python','requests')
---   SECRETS  = ('cred' = MCP_HOL.SUPPORT.SERVICENOW_CRED)
--- and POST to https://<host>/api/now/table/incident, reading resp.json()['result']['number']
--- as the incident number (fall back to the local INC id if unreachable).
+GRANT USAGE ON PROCEDURE MCP_HOL.SUPPORT.FILE_TICKET(VARCHAR, VARCHAR, VARCHAR) TO ROLE CUSTOMER_AGENT;
