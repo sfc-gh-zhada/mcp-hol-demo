@@ -226,7 +226,12 @@ INSERT INTO MCP_HOL.SUPPORT.INTENT_PROBE (MESSAGE, INTENT) VALUES
 -- ------------------------------------------------------------
 -- Step 2  Kick off the fine-tune (ASYNC -> returns a job id).
 -- The prompt string is IDENTICAL to the one CLASSIFY_INTENT uses at inference,
--- so train-time and serve-time prompts match. completion = the bare label.
+-- so train-time and serve-time prompts match. completion = the JSON object the
+-- response_format enum enforces at serve time ({"intent":"<LABEL>"}), NOT a bare
+-- label -- per the fine-tuning docs: "to get responses that follow a schema you
+-- define, use structured outputs to generate fine-tuning data." Training on the
+-- served shape removes the train/serve skew that constrained decoding otherwise
+-- introduces (a bare-label fine-tune loses accuracy when forced to emit JSON).
 -- ------------------------------------------------------------
 -- Idempotency: drop any prior model of this name so re-runs succeed cleanly.
 DROP MODEL IF EXISTS MCP_HOL.SUPPORT.SUPPORT_INTENT_8B;
@@ -235,8 +240,8 @@ SELECT SNOWFLAKE.CORTEX.FINETUNE(
   'CREATE',
   'MCP_HOL.SUPPORT.SUPPORT_INTENT_8B',
   'llama3.1-8b',
-  $$SELECT 'Classify the customer support message into exactly one label from this list: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. Reply with only the label and nothing else. Message: ' || MESSAGE || ' Label:' AS prompt, INTENT AS completion FROM MCP_HOL.SUPPORT.INTENT_TRAIN$$,
-  $$SELECT 'Classify the customer support message into exactly one label from this list: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. Reply with only the label and nothing else. Message: ' || MESSAGE || ' Label:' AS prompt, INTENT AS completion FROM MCP_HOL.SUPPORT.INTENT_VAL$$
+  $$SELECT 'Classify the customer support message into exactly one label from this list: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. Reply with only the label and nothing else. Message: ' || MESSAGE || ' Label:' AS prompt, '{"intent":"' || INTENT || '"}' AS completion FROM MCP_HOL.SUPPORT.INTENT_TRAIN$$,
+  $$SELECT 'Classify the customer support message into exactly one label from this list: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. Reply with only the label and nothing else. Message: ' || MESSAGE || ' Label:' AS prompt, '{"intent":"' || INTENT || '"}' AS completion FROM MCP_HOL.SUPPORT.INTENT_VAL$$
 );
 -- Poll to completion (replace <job_id> with the id returned above):
 --   SELECT SNOWFLAKE.CORTEX.FINETUNE('DESCRIBE', '<job_id>');
@@ -244,31 +249,58 @@ SELECT SNOWFLAKE.CORTEX.FINETUNE(
 
 -- ------------------------------------------------------------
 -- Step 3  The tool wrapper UDF the MCP GENERIC tool points at.
--- Same prompt as training; TRIM/UPPER normalizes to a clean label.
--- (DDL succeeds even before training finishes; calls work once model is SUCCESS.)
+-- Reliability comes from response_format, not an instruction sentence: the enum
+-- constrains decoding so the model CANNOT emit anything but one of the six labels
+-- (no "reply with only the label" hope, no TRIM/UPPER cleanup). The prompt stays
+-- byte-identical to the training prompt (Step 2) so the fine-tune's learned
+-- accuracy is preserved -- the enum bounds WHICH label, the matched prompt keeps
+-- it the RIGHT label. (DDL succeeds even before training finishes; calls work
+-- once the model is SUCCESS.)
 -- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION MCP_HOL.SUPPORT.CLASSIFY_INTENT(message STRING)
 RETURNS STRING
 AS
 $$
-    UPPER(TRIM(SNOWFLAKE.CORTEX.COMPLETE(
-        'MCP_HOL.SUPPORT.SUPPORT_INTENT_8B',
-        'Classify the customer support message into exactly one label from this list: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. Reply with only the label and nothing else. Message: ' || message || ' Label:'
-    )))
+    PARSE_JSON(AI_COMPLETE(
+        model => 'MCP_HOL.SUPPORT.SUPPORT_INTENT_8B',
+        prompt => 'Classify the customer support message into exactly one label from this list: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. Reply with only the label and nothing else. Message: ' || message || ' Label:',
+        response_format => {
+            'type':'json',
+            'schema': {
+                'type':'object',
+                'properties': {
+                    'intent': {'type':'string','enum': ['ORDER_STATUS','SHIPPING_DELAY','DEFECTIVE_ITEM','RETURN_REFUND','SIZING_EXCHANGE','GENERAL_FEEDBACK']}
+                },
+                'required': ['intent']
+            }
+        }
+    )):intent::string
 $$;
 
 -- ------------------------------------------------------------
 -- Step 4  Verify + score: fine-tuned vs base llama3.1-8b zero-shot on the probe.
+-- Both sides use the SAME prompt AND the same response_format enum, so format is
+-- held constant and the delta reflects model quality, not output-cleanliness.
 -- Capture FT_ACCURACY for the talk track ("fine-tuned beats base zero-shot").
 -- ------------------------------------------------------------
 WITH scored AS (
   SELECT
     INTENT AS actual,
     MCP_HOL.SUPPORT.CLASSIFY_INTENT(MESSAGE) AS ft_pred,
-    UPPER(TRIM(SNOWFLAKE.CORTEX.COMPLETE(
-      'llama3.1-8b',
-      'Classify the customer support message into exactly one label from this list: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. Reply with only the label and nothing else. Message: ' || MESSAGE || ' Label:'
-    ))) AS base_pred
+    PARSE_JSON(AI_COMPLETE(
+      model => 'llama3.1-8b',
+      prompt => 'Classify the customer support message into exactly one label from this list: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. Reply with only the label and nothing else. Message: ' || MESSAGE || ' Label:',
+      response_format => {
+        'type':'json',
+        'schema': {
+          'type':'object',
+          'properties': {
+            'intent': {'type':'string','enum': ['ORDER_STATUS','SHIPPING_DELAY','DEFECTIVE_ITEM','RETURN_REFUND','SIZING_EXCHANGE','GENERAL_FEEDBACK']}
+          },
+          'required': ['intent']
+        }
+      }
+    )):intent::string AS base_pred
   FROM MCP_HOL.SUPPORT.INTENT_PROBE
 )
 SELECT
