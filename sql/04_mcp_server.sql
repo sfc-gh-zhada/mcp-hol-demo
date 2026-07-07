@@ -26,7 +26,7 @@ tools:
     type: "CORTEX_SEARCH_SERVICE_QUERY"
     identifier: "MCP_HOL.SUPPORT.SEARCH_REVIEWS"
     title: "Search customer reviews"
-    description: "Search customer product reviews for a topic (zipper problems, sizing, shipping, warmth, etc.) and return the most relevant matching reviews."
+    description: "Search customer product reviews for a topic (zipper problems, sizing, shipping, warmth, etc.) and return the most relevant matching reviews. Each review has REVIEW_TEXT plus attributes PRODUCT, RATING, ORDER_ID, REVIEW_DATE; pass any of those names in the optional 'columns' arg to include them (only REVIEW_TEXT is returned by default), and filter on the attributes via 'filter'."
   - name: "get_order_status"
     type: "GENERIC"
     identifier: "MCP_HOL.SUPPORT.GET_ORDER_STATUS"
