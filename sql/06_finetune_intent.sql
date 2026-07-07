@@ -149,6 +149,36 @@ INSERT INTO MCP_HOL.SUPPORT.INTENT_TRAIN (MESSAGE, INTENT) VALUES
 ($$Best purchase I've made this winter. Thank you so much!$$, 'GENERAL_FEEDBACK'),
 ($$Just wanted to share how much I enjoy this jacket.$$, 'GENERAL_FEEDBACK');
 
+-- Terse / telegraphic register augmentation. Real support queues get 1-2 word
+-- messages; the full-sentence examples above don't teach that style, so the model
+-- used to read any terse query as SHIPPING_DELAY. Crucially this teaches the
+-- ORDER_STATUS vs SHIPPING_DELAY boundary on terse input: a bare tracking/location
+-- question with NO lateness signal = ORDER_STATUS; terse WITH a lateness signal =
+-- SHIPPING_DELAY. (Deliberately NOT the probe strings -- teaches the style, no leakage.)
+INSERT INTO MCP_HOL.SUPPORT.INTENT_TRAIN (MESSAGE, INTENT) VALUES
+($$track my order?$$, 'ORDER_STATUS'),
+($$wheres my stuff$$, 'ORDER_STATUS'),
+($$any tracking info$$, 'ORDER_STATUS'),
+($$order status?$$, 'ORDER_STATUS'),
+($$hows my order coming along$$, 'ORDER_STATUS'),
+($$whats my tracking number$$, 'ORDER_STATUS'),
+($$so late$$, 'SHIPPING_DELAY'),
+($$still nothing weeks later$$, 'SHIPPING_DELAY'),
+($$way overdue$$, 'SHIPPING_DELAY'),
+($$package stuck forever$$, 'SHIPPING_DELAY'),
+($$zipper broken$$, 'DEFECTIVE_ITEM'),
+($$came ripped$$, 'DEFECTIVE_ITEM'),
+($$seam split$$, 'DEFECTIVE_ITEM'),
+($$refund me$$, 'RETURN_REFUND'),
+($$want my money back$$, 'RETURN_REFUND'),
+($$how do i return$$, 'RETURN_REFUND'),
+($$too small need bigger$$, 'SIZING_EXCHANGE'),
+($$swap size pls$$, 'SIZING_EXCHANGE'),
+($$runs large$$, 'SIZING_EXCHANGE'),
+($$love it$$, 'GENERAL_FEEDBACK'),
+($$great coat$$, 'GENERAL_FEEDBACK'),
+($$awesome quality$$, 'GENERAL_FEEDBACK');
+
 CREATE OR REPLACE TABLE MCP_HOL.SUPPORT.INTENT_VAL (MESSAGE STRING, INTENT STRING);
 INSERT INTO MCP_HOL.SUPPORT.INTENT_VAL (MESSAGE, INTENT) VALUES
 ($$Any news on my order? I'd love a tracking update.$$, 'ORDER_STATUS'),
@@ -248,33 +278,40 @@ SELECT SNOWFLAKE.CORTEX.FINETUNE(
 -- Wait for "status": "SUCCESS" before the model is callable.
 
 -- ------------------------------------------------------------
--- Step 3  The tool wrapper UDF the MCP GENERIC tool points at.
--- Reliability comes from response_format, not an instruction sentence: the enum
--- constrains decoding so the model CANNOT emit anything but one of the six labels
--- (no "reply with only the label" hope, no TRIM/UPPER cleanup). The prompt stays
--- byte-identical to the training prompt (Step 2) so the fine-tune's learned
--- accuracy is preserved -- the enum bounds WHICH label, the matched prompt keeps
--- it the RIGHT label. (DDL succeeds even before training finishes; calls work
--- once the model is SUCCESS.)
+-- Step 3  The tool wrapper the MCP GENERIC tool points at -- a STORED PROCEDURE.
+-- A Cortex FINE-TUNED model is reachable through the managed MCP server ONLY when
+-- the tool runs in a normal owner's-rights session, i.e. EXECUTE AS OWNER. The
+-- GENERIC *function* tool path can't resolve a fine-tuned model and returns
+-- "Model ... is unavailable" (err 100351); base models work either way. The
+-- fine-tune was trained on {"intent":"<LABEL>"} completions, so it emits that JSON
+-- from its weights -- the proc just parses the label out. (DDL succeeds even
+-- before training finishes; calls work once the model is SUCCESS.)
 -- ------------------------------------------------------------
-CREATE OR REPLACE FUNCTION MCP_HOL.SUPPORT.CLASSIFY_INTENT(message STRING)
+-- Retire the old function form (superseded by the procedure below).
+DROP FUNCTION IF EXISTS MCP_HOL.SUPPORT.CLASSIFY_INTENT(VARCHAR);
+
+CREATE OR REPLACE PROCEDURE MCP_HOL.SUPPORT.CLASSIFY_INTENT_PROC(MESSAGE STRING)
 RETURNS STRING
-AS
-$$
-    PARSE_JSON(AI_COMPLETE(
-        model => 'MCP_HOL.SUPPORT.SUPPORT_INTENT_8B',
-        prompt => 'Classify the customer support message into exactly one label from this list: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. Reply with only the label and nothing else. Message: ' || message || ' Label:',
-        response_format => {
-            'type':'json',
-            'schema': {
-                'type':'object',
-                'properties': {
-                    'intent': {'type':'string','enum': ['ORDER_STATUS','SHIPPING_DELAY','DEFECTIVE_ITEM','RETURN_REFUND','SIZING_EXCHANGE','GENERAL_FEEDBACK']}
-                },
-                'required': ['intent']
-            }
-        }
-    )):intent::string
+LANGUAGE PYTHON
+RUNTIME_VERSION = 3.11
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER = 'run'
+EXECUTE AS OWNER
+AS $$
+def run(session, message):
+    prompt = ('Classify the customer support message into exactly one label from this list: '
+              'ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. '
+              'Reply with only the label and nothing else. Message: ' + (message or '') + ' Label:')
+    row = session.sql(
+        "SELECT SNOWFLAKE.CORTEX.COMPLETE('MCP_HOL.SUPPORT.SUPPORT_INTENT_8B', ?)",
+        params=[prompt]).collect()
+    raw = (row[0][0] or '').strip()
+    import json, re
+    try:
+        return str(json.loads(raw).get('intent', raw)).strip().upper()
+    except Exception:
+        m = re.search(r'[A-Z_]{4,}', raw.upper())
+        return m.group(0) if m else raw.upper()
 $$;
 
 -- ------------------------------------------------------------
@@ -286,7 +323,20 @@ $$;
 WITH scored AS (
   SELECT
     INTENT AS actual,
-    MCP_HOL.SUPPORT.CLASSIFY_INTENT(MESSAGE) AS ft_pred,
+    PARSE_JSON(AI_COMPLETE(
+      model => 'MCP_HOL.SUPPORT.SUPPORT_INTENT_8B',
+      prompt => 'Classify the customer support message into exactly one label from this list: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. Reply with only the label and nothing else. Message: ' || MESSAGE || ' Label:',
+      response_format => {
+        'type':'json',
+        'schema': {
+          'type':'object',
+          'properties': {
+            'intent': {'type':'string','enum': ['ORDER_STATUS','SHIPPING_DELAY','DEFECTIVE_ITEM','RETURN_REFUND','SIZING_EXCHANGE','GENERAL_FEEDBACK']}
+          },
+          'required': ['intent']
+        }
+      }
+    )):intent::string AS ft_pred,   -- scoreboard runs in SQL (not via MCP), so AI_COMPLETE is fine here
     PARSE_JSON(AI_COMPLETE(
       model => 'llama3.1-8b',
       prompt => 'Classify the customer support message into exactly one label from this list: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. Reply with only the label and nothing else. Message: ' || MESSAGE || ' Label:',
@@ -314,4 +364,4 @@ FROM scored;
 -- Fine-tune jobs/models are garbage-collected over ~weeks; if this errors with
 -- "model ... is unavailable", re-run this whole script to recreate the model.
 -- ------------------------------------------------------------
---   SELECT MCP_HOL.SUPPORT.CLASSIFY_INTENT('The zipper broke on day one');  -- expect DEFECTIVE_ITEM
+--   CALL MCP_HOL.SUPPORT.CLASSIFY_INTENT_PROC('The zipper broke on day one');  -- expect DEFECTIVE_ITEM
