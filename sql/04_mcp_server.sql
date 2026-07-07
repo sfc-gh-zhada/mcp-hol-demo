@@ -1,63 +1,60 @@
 -- The tool surface a Gemini agent (on Google Cloud) connects to over MCP.
--- One statement turns Snowflake objects into agent tools. read_only run_sql lets
--- the agent EXECUTE and return actual numbers (Cortex Analyst returns SQL, not rows).
--- Note what is NOT here: APPROVE_CASE. The agent can open a case; only a human approves.
+-- One statement turns Snowflake objects into agent tools. This is the CUSTOMER-
+-- FACING surface: exactly four tools, nothing that can read other customers,
+-- run arbitrary SQL, or issue refunds. classify_intent is a GENERIC *procedure*
+-- (a fine-tuned model is only reachable through the MCP server via an owner's-
+-- rights procedure). search_reviews is a Cortex Search tool whose input schema
+-- is AUTO-GENERATED (query required; columns/filter/limit optional) -- so it
+-- declares no input_schema block here.
 CREATE OR REPLACE MCP SERVER MCP_HOL.AGENTS.MCP_HOL
 FROM SPECIFICATION $$
 tools:
   - name: "classify_intent"
     type: "GENERIC"
-    identifier: "MCP_HOL.SUPPORT.CLASSIFY_INTENT"
-    title: "Classify a support message (fine-tuned model)"
-    description: "Classify an incoming customer-support message into exactly one intent: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, or GENERAL_FEEDBACK. Backed by SUPPORT_INTENT_8B - a Llama 3.1 8B fine-tuned in-account on our own labeled messages, so the decision boundary is ours."
-    config:
-      type: "function"
-      warehouse: "COCO_WH"
-      input_schema:
-        type: "object"
-        properties:
-          message:
-            type: "string"
-            description: "The customer's support message text"
-        required: ["message"]
-  - name: "search_reviews"
-    type: "CORTEX_SEARCH_SERVICE_QUERY"
-    identifier: "MCP_HOL.SUPPORT.SEARCH_REVIEWS"
-    title: "Search customer reviews"
-    description: "Search customer reviews for a topic and return the most relevant reviews (shipping, sizing, zipper problems, etc.)."
-  - name: "ask_sales_data"
-    type: "CORTEX_ANALYST_MESSAGE"
-    identifier: "MCP_HOL.SALES.SALES_SV"
-    title: "Ask sales data"
-    description: "Ask natural-language questions about sales: units, revenue, and refunds by product, region, or date. Returns the interpretation and the generated SQL."
-  - name: "run_sql"
-    type: "SYSTEM_EXECUTE_SQL"
-    title: "Run read-only SQL"
-    description: "Run a read-only SQL SELECT against Snowflake to quantify impact - e.g. count affected orders or sum refunds for a product. Discover tables and columns via INFORMATION_SCHEMA if needed. Use this to return the actual numbers."
-    config:
-      read_only: true
-      warehouse: "COCO_WH"
-  - name: "create_support_ticket"
-    type: "GENERIC"
-    identifier: "MCP_HOL.SUPPORT.CREATE_TICKET"
-    title: "Open a refund-approval case"
-    description: "Open a refund-approval CASE for an order. This does NOT issue a refund - it records the recommendation and routes it to a human for approval. Provide order_id, a short issue description, and the recommended refund amount."
+    identifier: "MCP_HOL.SUPPORT.CLASSIFY_INTENT_PROC"
+    title: "Classify customer intent"
+    description: "Classify a customer's message into exactly one support intent label (ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK) using a fine-tuned model. Call this FIRST to triage the customer's message; its label is required to file a ticket."
     config:
       type: "procedure"
       warehouse: "COCO_WH"
       input_schema:
         type: "object"
         properties:
-          order_id:
-            type: "string"
-            description: "The affected order id, e.g. ORD-10001"
-          issue:
-            type: "string"
-            description: "Short description of the customer problem"
-          recommended_refund:
-            type: "number"
-            description: "Recommended refund amount in dollars"
-        required: ["order_id", "issue", "recommended_refund"]
+          message: { type: "string", description: "The customer's message to classify" }
+        required: ["message"]
+  - name: "search_reviews"
+    type: "CORTEX_SEARCH_SERVICE_QUERY"
+    identifier: "MCP_HOL.SUPPORT.SEARCH_REVIEWS"
+    title: "Search customer reviews"
+    description: "Search customer product reviews for a topic (zipper problems, sizing, shipping, warmth, etc.) and return the most relevant matching reviews."
+  - name: "get_order_status"
+    type: "GENERIC"
+    identifier: "MCP_HOL.SUPPORT.GET_ORDER_STATUS"
+    title: "Look up order status"
+    description: "Look up the status and shipment details of a SINGLE order by its order id. Returns the current status, carrier, tracking number, and delivery date."
+    config:
+      type: "function"
+      warehouse: "COCO_WH"
+      input_schema:
+        type: "object"
+        properties:
+          order_id: { type: "string", description: "The customer's order id, e.g. ORD-10001" }
+        required: ["order_id"]
+  - name: "file_ticket"
+    type: "GENERIC"
+    identifier: "MCP_HOL.SUPPORT.FILE_TICKET"
+    title: "Open a ServiceNow incident"
+    description: "File a ServiceNow incident for the customer's order. Requires the intent label from classify_intent, which routes the incident to the right queue/priority. Returns the incident number and routing."
+    config:
+      type: "procedure"
+      warehouse: "COCO_WH"
+      input_schema:
+        type: "object"
+        properties:
+          order_id: { type: "string", description: "The affected order id, e.g. ORD-10001" }
+          issue: { type: "string", description: "Short description of the customer's problem" }
+          intent: { type: "string", description: "The intent label from classify_intent (e.g. DEFECTIVE_ITEM). Used to route the incident." }
+        required: ["order_id", "issue", "intent"]
 $$;
 
 SHOW MCP SERVERS IN SCHEMA MCP_HOL.AGENTS;
