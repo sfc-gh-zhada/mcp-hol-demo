@@ -255,13 +255,12 @@ INSERT INTO MCP_HOL.SUPPORT.INTENT_PROBE (MESSAGE, INTENT) VALUES
 
 -- ------------------------------------------------------------
 -- Step 2  Kick off the fine-tune (ASYNC -> returns a job id).
--- The prompt string is IDENTICAL to the one CLASSIFY_INTENT uses at inference,
--- so train-time and serve-time prompts match. completion = the JSON object the
--- response_format enum enforces at serve time ({"intent":"<LABEL>"}), NOT a bare
--- label -- per the fine-tuning docs: "to get responses that follow a schema you
--- define, use structured outputs to generate fine-tuning data." Training on the
--- served shape removes the train/serve skew that constrained decoding otherwise
--- introduces (a bare-label fine-tune loses accuracy when forced to emit JSON).
+-- The prompt is JUST THE RAW CUSTOMER MESSAGE -- no instructions, no label list,
+-- no "reply with only the label." That is the whole point of a fine-tune: the task
+-- and the label space live in the WEIGHTS, so inference needs zero prompt
+-- engineering. completion = the JSON object ({"intent":"<LABEL>"}) so the learned
+-- output already matches the response_format schema used at serve time (no skew).
+-- Train-time prompt == serve-time prompt == the bare message.
 -- ------------------------------------------------------------
 -- Idempotency: drop any prior model of this name so re-runs succeed cleanly.
 DROP MODEL IF EXISTS MCP_HOL.SUPPORT.SUPPORT_INTENT_8B;
@@ -270,8 +269,8 @@ SELECT SNOWFLAKE.CORTEX.FINETUNE(
   'CREATE',
   'MCP_HOL.SUPPORT.SUPPORT_INTENT_8B',
   'llama3.1-8b',
-  $$SELECT 'Classify the customer support message into exactly one label from this list: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. Reply with only the label and nothing else. Message: ' || MESSAGE || ' Label:' AS prompt, '{"intent":"' || INTENT || '"}' AS completion FROM MCP_HOL.SUPPORT.INTENT_TRAIN$$,
-  $$SELECT 'Classify the customer support message into exactly one label from this list: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. Reply with only the label and nothing else. Message: ' || MESSAGE || ' Label:' AS prompt, '{"intent":"' || INTENT || '"}' AS completion FROM MCP_HOL.SUPPORT.INTENT_VAL$$
+  $$SELECT MESSAGE AS prompt, '{"intent":"' || INTENT || '"}' AS completion FROM MCP_HOL.SUPPORT.INTENT_TRAIN$$,
+  $$SELECT MESSAGE AS prompt, '{"intent":"' || INTENT || '"}' AS completion FROM MCP_HOL.SUPPORT.INTENT_VAL$$
 );
 -- Poll to completion (replace <job_id> with the id returned above):
 --   SELECT SNOWFLAKE.CORTEX.FINETUNE('DESCRIBE', '<job_id>');
@@ -299,12 +298,11 @@ HANDLER = 'run'
 EXECUTE AS OWNER
 AS $$
 def run(session, message):
-    prompt = ('Classify the customer support message into exactly one label from this list: '
-              'ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. '
-              'Reply with only the label and nothing else. Message: ' + (message or '') + ' Label:')
+    # Fine-tuned model -> the prompt is just the raw message. No instructions or
+    # label list: the fine-tune learned the task and the six labels in its weights.
     row = session.sql(
         "SELECT SNOWFLAKE.CORTEX.COMPLETE('MCP_HOL.SUPPORT.SUPPORT_INTENT_8B', ?)",
-        params=[prompt]).collect()
+        params=[message or '']).collect()
     raw = (row[0][0] or '').strip()
     import json, re
     try:
@@ -315,17 +313,17 @@ def run(session, message):
 $$;
 
 -- ------------------------------------------------------------
--- Step 4  Verify + score: fine-tuned vs base llama3.1-8b zero-shot on the probe.
--- Both sides use the SAME prompt AND the same response_format enum, so format is
--- held constant and the delta reflects model quality, not output-cleanliness.
--- Capture FT_ACCURACY for the talk track ("fine-tuned beats base zero-shot").
+-- Step 4  Verify + score: fine-tuned vs base llama3.1-8b on the probe.
+-- Both sides get the SAME bare-message prompt and the same response_format enum.
+-- This is the money shot: the fine-tune classifies with NO prompt engineering,
+-- while the base model with the same bare prompt has no idea what task to do.
 -- ------------------------------------------------------------
 WITH scored AS (
   SELECT
     INTENT AS actual,
     PARSE_JSON(AI_COMPLETE(
       model => 'MCP_HOL.SUPPORT.SUPPORT_INTENT_8B',
-      prompt => 'Classify the customer support message into exactly one label from this list: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. Reply with only the label and nothing else. Message: ' || MESSAGE || ' Label:',
+      prompt => MESSAGE,
       response_format => {
         'type':'json',
         'schema': {
@@ -339,7 +337,7 @@ WITH scored AS (
     )):intent::string AS ft_pred,   -- scoreboard runs in SQL (not via MCP), so AI_COMPLETE is fine here
     PARSE_JSON(AI_COMPLETE(
       model => 'llama3.1-8b',
-      prompt => 'Classify the customer support message into exactly one label from this list: ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK. Reply with only the label and nothing else. Message: ' || MESSAGE || ' Label:',
+      prompt => MESSAGE,
       response_format => {
         'type':'json',
         'schema': {
