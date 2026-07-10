@@ -1,11 +1,11 @@
 -- The tool surface a Gemini agent (on Google Cloud) connects to over MCP.
--- One statement turns Snowflake objects into agent tools. This is the CUSTOMER-
--- FACING surface: exactly four tools, nothing that can read other customers,
--- run arbitrary SQL, or issue refunds. classify_intent is a GENERIC *procedure*
--- (a fine-tuned model is only reachable through the MCP server via an owner's-
--- rights procedure). search_reviews is a Cortex Search tool whose input schema
--- is AUTO-GENERATED (query required; columns/filter/limit optional) -- so it
--- declares no input_schema block here.
+-- One statement turns Snowflake objects into agent tools. This is the neobank
+-- support agent's CUSTOMER-FACING surface: exactly four tools, nothing that can
+-- read other customers, run arbitrary SQL, or move money. classify_intent is a
+-- GENERIC *procedure* (a fine-tuned model is only reachable through the MCP
+-- server via an owner's-rights procedure). search_help_articles is a Cortex
+-- Search tool whose input schema is AUTO-GENERATED (query required;
+-- columns/filter/limit optional) -- so it declares no input_schema block here.
 CREATE OR REPLACE MCP SERVER MCP_HOL.AGENTS.MCP_HOL
 FROM SPECIFICATION $$
 tools:
@@ -13,7 +13,7 @@ tools:
     type: "GENERIC"
     identifier: "MCP_HOL.SUPPORT.CLASSIFY_INTENT_PROC"
     title: "Classify customer intent"
-    description: "Classify a customer's message into exactly one support intent label (ORDER_STATUS, SHIPPING_DELAY, DEFECTIVE_ITEM, RETURN_REFUND, SIZING_EXCHANGE, GENERAL_FEEDBACK) using a fine-tuned model. Call this FIRST to triage the customer's message; its label is required to file a ticket."
+    description: "Classify a customer's message into exactly one of 77 neobank support intents (e.g. card_arrival, lost_or_stolen_card, declined_card_payment, transfer_timing, exchange_rate, verify_my_identity) using an in-account FINE-TUNED model. Returns one lowercase_with_underscores label. Call this FIRST to triage the message; its label is REQUIRED by file_ticket to route the case to the right team."
     config:
       type: "procedure"
       warehouse: "COCO_WH"
@@ -22,40 +22,44 @@ tools:
         properties:
           message: { type: "string", description: "The customer's message to classify" }
         required: ["message"]
-  - name: "search_reviews"
+  - name: "search_help_articles"
     type: "CORTEX_SEARCH_SERVICE_QUERY"
-    identifier: "MCP_HOL.SUPPORT.SEARCH_REVIEWS"
-    title: "Search customer reviews"
-    description: "Search customer product reviews for a topic (zipper problems, sizing, shipping, warmth, etc.) and return the most relevant matching reviews. Each review has REVIEW_TEXT plus attributes PRODUCT, RATING, ORDER_ID, REVIEW_DATE; pass any of those names in the optional 'columns' arg to include them (only REVIEW_TEXT is returned by default), and filter on the attributes via 'filter'."
-  - name: "get_order_status"
+    identifier: "MCP_HOL.SUPPORT.SEARCH_HELP_ARTICLES"
+    title: "Search help-centre articles"
+    description: "Search the bank's help-centre knowledge base for a topic (card delivery times, lost/stolen card, declined payments, transfer timing, exchange rates, fees, identity verification, etc.) and return the most relevant articles. Each article has BODY plus attributes ARTICLE_ID, TITLE, CATEGORY; pass any of those names in the optional 'columns' arg to include them (only BODY is returned by default), and filter on CATEGORY via 'filter'."
+  - name: "get_transaction_status"
     type: "GENERIC"
-    identifier: "MCP_HOL.SUPPORT.GET_ORDER_STATUS"
-    title: "Look up order status"
-    description: "Look up the status and shipment details of a SINGLE order by its order id. Returns the current status, carrier, tracking number, and delivery date."
+    identifier: "MCP_HOL.SUPPORT.GET_TRANSACTION_STATUS"
+    title: "Look up a case or transaction"
+    description: "Look up the status of a SINGLE support case or transaction by its reference id (e.g. CASE-10001). Returns the topic, current status, expected date, and channel detail."
     config:
       type: "function"
       warehouse: "COCO_WH"
       input_schema:
         type: "object"
         properties:
-          order_id: { type: "string", description: "The customer's order id, e.g. ORD-10001" }
-        required: ["order_id"]
+          ref_id: { type: "string", description: "The case/transaction reference, e.g. CASE-10001" }
+        required: ["ref_id"]
   - name: "file_ticket"
     type: "GENERIC"
     identifier: "MCP_HOL.SUPPORT.FILE_TICKET"
-    title: "Open a ServiceNow incident"
-    description: "File a ServiceNow incident for the customer's order. Requires the intent label from classify_intent, which routes the incident to the right queue/priority. Returns the incident number and routing."
+    title: "Open a support incident"
+    description: "File a support incident for the customer's case. Requires the intent label from classify_intent, which routes the incident to the right queue/priority (e.g. lost_or_stolen_card -> Cards & Fraud/P1, card_arrival -> Cards). Returns the incident number and routing."
     config:
       type: "procedure"
       warehouse: "COCO_WH"
       input_schema:
         type: "object"
         properties:
-          order_id: { type: "string", description: "The affected order id, e.g. ORD-10001" }
+          ref_id: { type: "string", description: "The related case reference, e.g. CASE-10001" }
           issue: { type: "string", description: "Short description of the customer's problem" }
-          intent: { type: "string", description: "The intent label from classify_intent (e.g. DEFECTIVE_ITEM). Used to route the incident." }
-        required: ["order_id", "issue", "intent"]
+          intent: { type: "string", description: "The intent label from classify_intent (e.g. card_arrival). Used to route the incident." }
+        required: ["ref_id", "issue", "intent"]
 $$;
+
+-- Re-grant the scoped role after CREATE OR REPLACE (a replace drops prior grants).
+GRANT USAGE ON MCP SERVER MCP_HOL.AGENTS.MCP_HOL TO ROLE CUSTOMER_AGENT;
+GRANT USAGE ON PROCEDURE MCP_HOL.SUPPORT.CLASSIFY_INTENT_PROC(VARCHAR) TO ROLE CUSTOMER_AGENT;
 
 SHOW MCP SERVERS IN SCHEMA MCP_HOL.AGENTS;
 
