@@ -3,7 +3,7 @@
 -- Knowledge base + Cortex Search service behind the search_help_articles tool.
 -- The agent searches these neobank help articles to ground answers (e.g. how long
 -- a new card takes, what to do about a declined payment) instead of guessing.
--- (Replaces the retail REVIEWS search + the unused SALES semantic view.)
+-- (This is the bank's help-centre knowledge base that grounds search_help_articles.)
 -- ============================================================
 
 CREATE OR REPLACE TABLE MCP_HOL.SUPPORT.HELP_ARTICLES (
