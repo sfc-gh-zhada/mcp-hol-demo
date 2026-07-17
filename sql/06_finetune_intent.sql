@@ -17,7 +17,7 @@
 --   intents -- because telling apart "my card hasn't arrived" (card_arrival) from
 --   "when will my card arrive" (card_delivery_estimate) is a convention learned
 --   from thousands of tickets, not a describable rule. A fine-tuned 8B trained on
---   that history wins: ~88% vs frontier ~76-77% on the identical probe. You cannot
+--   that history wins: ~90% probe / 91% full-test vs frontier ~76-78%. You cannot
 --   fine-tune a closed frontier API; you CAN fine-tune on your governed Snowflake
 --   data and expose it as one governed MCP tool.
 --
