@@ -16,12 +16,9 @@ All included customer records and support content are synthetic. This repository
 - A Snowflake account with Managed MCP Server, Cortex Search, and Cortex fine-tuning access
 - A warehouse named `COCO_WH`, or equivalent edits to the SQL and notebook
 - A role allowed to create the objects used by the lab
-- The public Banking77 dataset loaded into:
-  - `MCP_HOL.SUPPORT.B77_TRAIN`
-  - `MCP_HOL.SUPPORT.B77_PROBE`
-  - `MCP_HOL.SUPPORT.B77_TEST`
+- The public Banking77 dataset, included as generated SQL in `sql/01_banking77.sql`
 
-The expected training-table columns are `TEXT` and `LABEL`. Banking77 is published under CC BY 4.0.
+Banking77 is published under CC BY 4.0. The generated tables contain `TEXT` and `LABEL` columns.
 
 ## Setup
 
@@ -29,12 +26,15 @@ Run the scripts in this order:
 
 1. `sql/00_setup.sql`
 2. `sql/00_cases_and_status.sql`
-3. `sql/03_search_help_articles.sql`
-4. `sql/06_finetune_intent.sql`
-5. `sql/02_case_ticket_and_routing.sql`
-6. `sql/04_mcp_server.sql`
+3. `sql/01_banking77.sql`
+4. `sql/03_search_help_articles.sql`
+5. `sql/06_finetune_intent.sql`
+6. `sql/02_case_ticket_and_routing.sql`
+7. `sql/04_mcp_server.sql`
 
-The fine-tuning job in step 4 is asynchronous. The procedure can be created immediately, but wait for the job to succeed before calling `CLASSIFY_INTENT_PROC` or creating the MCP server.
+The fine-tuning job in step 5 is asynchronous. The procedure can be created immediately, but wait for the job to succeed before calling `CLASSIFY_INTENT_PROC` or creating the MCP server.
+
+To regenerate the Banking77 SQL from the publisher's CSV files, run `scripts/build_banking77_sql.py TRAIN_CSV TEST_CSV sql/01_banking77.sql`.
 
 ## Open In Snowflake Workspaces
 
