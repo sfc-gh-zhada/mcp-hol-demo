@@ -40,7 +40,7 @@ The fine-tuning job in step 4 is asynchronous. The procedure can be created imme
 
 1. In Snowsight, open **Projects > Workspaces**.
 2. Select **From Git repository**.
-3. Paste `https://github.com/sfc-gh-zhada/mcp-hol-public`.
+3. Paste `https://github.com/sfc-gh-zhada/mcp-hol-demo`.
 4. Select **Public repository**. No GitHub credentials are required.
 5. Choose an API integration approved by your Snowflake administrator.
 6. Open `mcp_hol_demo.ipynb`.
